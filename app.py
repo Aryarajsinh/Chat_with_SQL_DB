@@ -2,6 +2,7 @@ import streamlit as st
 from pathlib import Path
 import os
 import urllib.parse
+import hashlib
 from dotenv import load_dotenv
 
 from sqlalchemy import create_engine
@@ -35,6 +36,51 @@ def get_secret(key: str, default: str = "") -> str:
 
 st.set_page_config(page_title="LangChain: Chat with SQL DB", page_icon="🦜", layout="wide")
 st.title("🦜 LangChain: Chat with SQL DB")
+
+# ---------------------------------------------------------
+# Admin Authentication State & Sidebar Accordion
+# ---------------------------------------------------------
+if "is_admin" not in st.session_state:
+    st.session_state["is_admin"] = False
+
+ADMIN_EMAIL = get_secret("ADMIN_EMAIL", "harmaaryarajsinh2003@gmail.com")
+# sha256 hash for Admin@321# to avoid hardcoding plaintext password in version control
+ADMIN_PASS_HASH = "17678796c469aae5ecc0ca1338425168a640e0c3a6177b95bc80356d023629d5"
+ADMIN_PASS_SECRET = get_secret("ADMIN_PASSWORD", "")
+
+with st.sidebar.expander("🔐 Admin Configuration", expanded=st.session_state["is_admin"]):
+    if st.session_state["is_admin"]:
+        st.success(f"✅ Logged in as Admin:\n`{ADMIN_EMAIL}`")
+        st.info("🔓 Full Rights Active: You can ADD, UPDATE, and DELETE data.")
+        if st.button("🚪 Logout Admin", use_container_width=True):
+            st.session_state["is_admin"] = False
+            st.rerun()
+    else:
+        st.markdown("**Admin Login**\n*(Required to Add, Edit, or Delete records)*")
+        admin_email_input = st.text_input("Admin Email", key="admin_email_in", placeholder="e.g. harmaaryarajsinh2003@gmail.com")
+        admin_pass_input = st.text_input("Admin Password", type="password", key="admin_pass_in", placeholder="Enter admin password...")
+
+        if st.button("🔑 Login as Admin", use_container_width=True):
+            entered_hash = hashlib.sha256(admin_pass_input.encode()).hexdigest()
+            is_email_valid = admin_email_input.strip().lower() == ADMIN_EMAIL.strip().lower()
+            is_pass_valid = (
+                (ADMIN_PASS_SECRET and admin_pass_input == ADMIN_PASS_SECRET) or
+                (entered_hash == ADMIN_PASS_HASH)
+            )
+
+            if is_email_valid and is_pass_valid:
+                st.session_state["is_admin"] = True
+                st.success("✅ Admin login successful!")
+                st.rerun()
+            else:
+                st.error("❌ Invalid Admin Email or Password.")
+
+# Current privileges indicator
+is_admin = st.session_state["is_admin"]
+if is_admin:
+    st.sidebar.markdown("🛡️ **Mode**: `ADMIN (Read & Write)`")
+else:
+    st.sidebar.markdown("👁️ **Mode**: `READ-ONLY` *(Login above to edit data)*")
 
 LOCALDB = "USE_LOCALDB"
 MYSQL = "USE_MYSQL"
@@ -198,11 +244,16 @@ def build_mssql_engine_url(conn_str: str) -> str:
 
 
 @st.cache_resource(ttl="2h")
-def configure_db(db_type, mssql_conn=None, selected_tables=None, mysql_host=None, mysql_user=None, mysql_password=None, mysql_db=None):
+def configure_db(db_type, is_admin_mode=False, mssql_conn=None, selected_tables=None, mysql_host=None, mysql_user=None, mysql_password=None, mysql_db=None):
     if db_type == LOCALDB:
         dbfilepath = (Path(__file__).parent / "student.db").absolute()
-        creator = lambda: sqlite3.connect(f"file:{dbfilepath}?mode=ro", uri=True)
-        return SQLDatabase(create_engine("sqlite:///", creator=creator), sample_rows_in_table_info=0)
+        if is_admin_mode:
+            # Full read/write connection for admin
+            return SQLDatabase(create_engine(f"sqlite:///{dbfilepath}"), sample_rows_in_table_info=0)
+        else:
+            # Read-only connection for non-admin
+            creator = lambda: sqlite3.connect(f"file:{dbfilepath}?mode=ro", uri=True)
+            return SQLDatabase(create_engine("sqlite:///", creator=creator), sample_rows_in_table_info=0)
 
     elif db_type == MYSQL:
         if not (mysql_host and mysql_user and mysql_password and mysql_db):
@@ -226,11 +277,11 @@ def configure_db(db_type, mssql_conn=None, selected_tables=None, mysql_host=None
 with st.spinner("Connecting to database and inspecting schema..."):
     try:
         if db_uri == MSSQL:
-            db = configure_db(db_uri, mssql_conn=mssql_conn_input, selected_tables=table_filter)
+            db = configure_db(db_uri, is_admin_mode=is_admin, mssql_conn=mssql_conn_input, selected_tables=table_filter)
         elif db_uri == MYSQL:
-            db = configure_db(db_uri, mysql_host=mysql_host, mysql_user=mysql_user, mysql_password=mysql_password, mysql_db=mysql_db)
+            db = configure_db(db_uri, is_admin_mode=is_admin, mysql_host=mysql_host, mysql_user=mysql_user, mysql_password=mysql_password, mysql_db=mysql_db)
         else:
-            db = configure_db(db_uri)
+            db = configure_db(db_uri, is_admin_mode=is_admin)
         st.sidebar.success(f" Connected! {len(db.get_usable_table_names())} table(s) loaded.")
     except Exception as e:
         st.error(f"Database connection error: {e}")
@@ -239,18 +290,29 @@ with st.spinner("Connecting to database and inspecting schema..."):
 # LLM Model setup
 llm = ChatGroq(groq_api_key=api_key, model_name=selected_model, streaming=True, temperature=0)
 
-# Toolkit & Agent with Conversational Memory Prompt
+# Toolkit & Agent setup
 toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 
-custom_prefix = (
-    "You are an agent designed to interact with a SQL database.\n"
-    "Given an input question and the previous conversation history, determine what information the user needs.\n"
-    "If the user refers to previous queries, tables, entities, or results (such as 'same query again', 'repeat that query', 'show more details', 'what about that customer'), "
-    "use the conversation history to understand their intent and run the appropriate query.\n"
-    "Create a syntactically correct {dialect} query, run it, and answer clearly.\n"
-    "Unless the user specifies a specific number of examples, limit your query to at most {top_k} results.\n"
-    "DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.)."
-)
+# Dynamic prompt based on Admin rights
+if is_admin:
+    custom_prefix = (
+        "You are an administrative SQL agent with FULL READ AND WRITE privileges on a {dialect} database.\n"
+        "You are authorized to execute SELECT queries as well as DML statements (INSERT, UPDATE, DELETE) when instructed by the admin.\n"
+        "Given the input request and previous conversation history, determine the necessary operation.\n"
+        "Before modifying data with INSERT, UPDATE, or DELETE, check the relevant table schema to construct valid SQL statements.\n"
+        "After performing an INSERT, UPDATE, or DELETE, report exactly what changes were made and verify the result clearly.\n"
+        "DO NOT execute destructive commands like DROP DATABASE or DROP TABLE unless explicitly instructed."
+    )
+else:
+    custom_prefix = (
+        "You are an agent designed to interact with a SQL database in READ-ONLY mode.\n"
+        "Given an input question and the previous conversation history, determine what information the user needs.\n"
+        "Create a syntactically correct {dialect} SELECT query, run it, and answer clearly.\n"
+        "Unless the user specifies a specific number of examples, limit your query to at most {top_k} results.\n"
+        "DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP, ALTER etc.).\n"
+        "IMPORTANT: If the user asks to add, insert, update, edit, or delete any data, politely refuse and state: "
+        "'⚠️ You do not have write permissions. Please log in as Admin in the sidebar to perform ADD, EDIT, or DELETE operations.'"
+    )
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", custom_prefix.format(dialect=db.dialect, top_k=10)),
@@ -267,14 +329,31 @@ agent = create_sql_agent(
     agent_type="tool-calling"
 )
 
+# Optional Admin Direct SQL Runner in Sidebar
+if is_admin:
+    with st.sidebar.expander("🛠️ Admin Direct SQL Console"):
+        direct_sql = st.text_area("Write SQL Command", height=70, placeholder="e.g. SELECT TOP 5 * FROM ...")
+        if st.button("Execute SQL"):
+            if direct_sql.strip():
+                try:
+                    res_sql = db.run(direct_sql.strip())
+                    st.code(res_sql if res_sql else "Query executed successfully.")
+                except Exception as ex:
+                    st.error(f"SQL Error: {ex}")
+
 # Chat messages setup
 if "messages" not in st.session_state or st.sidebar.button("Clear message history"):
-    st.session_state["messages"] = [{"role": "assistant", "content": "How can I help you query your database?"}]
+    welcome_text = (
+        "🛡️ **Admin Mode Active**: You can query, add, update, or delete data."
+        if is_admin else
+        "How can I help you query your database? *(Read-only mode. Login in sidebar for Admin rights)*"
+    )
+    st.session_state["messages"] = [{"role": "assistant", "content": welcome_text}]
 
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).write(msg["content"])
 
-user_query = st.chat_input(placeholder="Ask anything from the database...")
+user_query = st.chat_input(placeholder="Ask anything from the database or enter a command...")
 
 if user_query:
     st.session_state.messages.append({"role": "user", "content": user_query})
@@ -282,13 +361,12 @@ if user_query:
 
     # Build conversation history for the agent from session state
     chat_history = []
-    for msg in st.session_state.messages[:-1]:  # exclude the current query just appended
+    for msg in st.session_state.messages[:-1]:
         if msg["role"] == "user":
             chat_history.append(HumanMessage(content=msg["content"]))
-        elif msg["role"] == "assistant" and msg["content"] != "How can I help you query your database?":
+        elif msg["role"] == "assistant":
             chat_history.append(AIMessage(content=msg["content"]))
 
-    # Keep the last 16 turns to avoid exceeding context window
     chat_history = chat_history[-16:]
 
     with st.chat_message("assistant"):
