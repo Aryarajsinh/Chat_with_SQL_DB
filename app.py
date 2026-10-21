@@ -16,7 +16,6 @@ from langchain_groq import ChatGroq
 # ---------------------------------------------------------
 # Helper to read secrets from Streamlit Secrets or .env
 # ---------------------------------------------------------
-# Load local .env if present
 env_path = Path(__file__).resolve().parent / ".env"
 if env_path.exists():
     load_dotenv(env_path)
@@ -41,7 +40,7 @@ LOCALDB = "USE_LOCALDB"
 MYSQL = "USE_MYSQL"
 MSSQL = "USE_MSSQL"
 
-# Database options: Defaulting to SQLite ensures the demo works out-of-the-box
+# Database options
 radio_opt = [
     "Use SQLite 3 Database - Student.db",
     "Connect to ERP Database (SQL Server)",
@@ -52,18 +51,32 @@ selected_opt = st.sidebar.radio(label="Choose the DB which you want to chat", op
 
 # Sidebar configurations per DB type
 table_filter = None
-default_mssql_conn = get_secret("MSSQL_CONN_STRING", "")
+secret_mssql_conn = get_secret("MSSQL_CONN_STRING", "")
 
 if selected_opt == radio_opt[1]:
     db_uri = MSSQL
     st.sidebar.subheader("ERP SQL Server Details")
-    mssql_conn_input = st.sidebar.text_area(
-        "Connection String",
-        value=default_mssql_conn,
-        height=120,
-        placeholder="Server=your-server.database.windows.net;Database=your_db;User Id=your_user;Password=your_pass;Encrypt=True;TrustServerCertificate=True;",
-        help="ADO.NET / ODBC style connection string (can also be configured via MSSQL_CONN_STRING secret)"
-    )
+
+    if secret_mssql_conn:
+        st.sidebar.success("🔒 Live ERP Connection active (Secured via Secrets)")
+        with st.sidebar.expander("Override connection (optional)"):
+            custom_mssql_conn = st.text_area(
+                "Custom Connection String",
+                value="",
+                height=100,
+                placeholder="Enter custom connection string to override...",
+                help="Leave empty to use the secured secrets configuration."
+            )
+        mssql_conn_input = custom_mssql_conn.strip() if custom_mssql_conn.strip() else secret_mssql_conn
+    else:
+        mssql_conn_input = st.sidebar.text_area(
+            "Connection String",
+            value="",
+            height=120,
+            placeholder="Server=your-server.database.windows.net;Database=your_db;User Id=your_user;Password=your_pass;Encrypt=True;TrustServerCertificate=True;",
+            help="ADO.NET / ODBC style connection string (can also be configured via MSSQL_CONN_STRING secret)"
+        )
+
     table_filter_input = st.sidebar.text_input(
         "Focus on specific tables (optional)",
         value="",
@@ -80,9 +93,18 @@ if selected_opt == radio_opt[1]:
 elif selected_opt == radio_opt[2]:
     db_uri = MYSQL
     st.sidebar.subheader("MySQL Details")
+    secret_mysql_pass = get_secret("MYSQL_PASSWORD", "")
     mysql_host = st.sidebar.text_input("MySQL Host", value=get_secret("MYSQL_HOST", "localhost"))
     mysql_user = st.sidebar.text_input("MySQL User", value=get_secret("MYSQL_USER", "root"))
-    mysql_password = st.sidebar.text_input("MySQL Password", type="password", value=get_secret("MYSQL_PASSWORD", ""))
+
+    if secret_mysql_pass:
+        st.sidebar.success("🔒 MySQL Password loaded securely from secrets")
+        with st.sidebar.expander("Override MySQL Password"):
+            custom_pass = st.text_input("Custom Password", type="password", value="")
+        mysql_password = custom_pass if custom_pass else secret_mysql_pass
+    else:
+        mysql_password = st.sidebar.text_input("MySQL Password", type="password", value="")
+
     mysql_db = st.sidebar.text_input("MySQL Database", value=get_secret("MYSQL_DB", ""))
 
 else:
@@ -91,8 +113,20 @@ else:
 
 # LLM Configurations
 st.sidebar.subheader("LLM Configuration")
-default_api_key = get_secret("GROQ_API_KEY", "")
-api_key = st.sidebar.text_input(label="Groq API Key", type="password", value=default_api_key)
+secret_api_key = get_secret("GROQ_API_KEY", "")
+
+if secret_api_key:
+    st.sidebar.success("🔒 Groq API Key loaded securely")
+    with st.sidebar.expander("Change API Key (optional)"):
+        custom_api_key = st.text_input(
+            "Custom Groq API Key",
+            type="password",
+            value="",
+            placeholder="Enter custom key to override..."
+        )
+    api_key = custom_api_key.strip() if custom_api_key.strip() else secret_api_key
+else:
+    api_key = st.sidebar.text_input(label="Groq API Key", type="password", value="")
 
 available_models = [
     "openai/gpt-oss-120b",
