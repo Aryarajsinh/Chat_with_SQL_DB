@@ -120,7 +120,7 @@ def get_default_odbc_driver() -> str:
 
 
 def build_mssql_engine_url(conn_str: str) -> str:
-    """Parse connection string into a SQLAlchemy pyodbc URL."""
+    """Parse connection string into a SQLAlchemy pymssql or pyodbc URL."""
     params = {}
     for part in conn_str.split(";"):
         if "=" in part:
@@ -131,6 +131,22 @@ def build_mssql_engine_url(conn_str: str) -> str:
     database = params.get("database", "")
     user = params.get("user id", params.get("uid", ""))
     pwd = params.get("password", params.get("pwd", ""))
+
+    # Prefer pymssql (works natively on Linux/Streamlit Cloud without requiring system-level ODBC drivers)
+    try:
+        import pymssql
+        u = urllib.parse.quote_plus(user)
+        p = urllib.parse.quote_plus(pwd)
+        s = server.split(",")[0].strip()
+        port = ""
+        if "," in server:
+            _, port_val = server.split(",", 1)
+            port = f":{port_val.strip()}"
+        return f"mssql+pymssql://{u}:{p}@{s}{port}/{database}?charset=utf8"
+    except ImportError:
+        pass
+
+    # Fallback to pyodbc
     encrypt = "yes" if params.get("encrypt", "").lower() in ["true", "yes"] else "no"
     trust_cert = "yes" if params.get("trustservercertificate", "").lower() in ["true", "yes"] else "no"
     driver = params.get("driver", get_default_odbc_driver())
